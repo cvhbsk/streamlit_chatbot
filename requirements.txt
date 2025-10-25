@@ -1,0 +1,5 @@
+streamlit==1.50.0
+requests
+urllib3
+google-genai
+pydantic
