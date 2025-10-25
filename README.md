@@ -31,7 +31,7 @@ Follow these steps to get a local copy of the project up and running.
 
 ```bash
 git clone <YOUR_REPO_URL>
-cd streamlit_project
+cd streamlit_chatbot
 ````
 
 ### 2\. Create and activate a virtual environment

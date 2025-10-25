@@ -4,6 +4,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 import json
+from streamlit_extras.stylable_container import stylable_container
 
 # --- 1. CONFIGURATION AND MOCK DATA ---
 
@@ -12,6 +13,7 @@ try:
     if "GEMINI_API_KEY" in st.secrets:
         client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
     else:
+        # Client will be None if key is missing/empty
         st.error("Gemini API key not found in `.streamlit/secrets.toml`. Please set it to run the LLM-based scoring.")
         client = None
 except Exception as e:
@@ -126,40 +128,11 @@ def get_scoring_and_suggestions(problem_statement: str):
         st.exception(e) # Show the error to the coder/user
         return "GOOD", []
 
-# --- UTILITY FUNCTION FOR PROGRESS ---
-
-def handle_diagnosis_confirmation(user_input):
-    """Handles Step 3: User confirms/adjusts the automated diagnosis via multiselect."""
-    # The multiselect value is already stored in st.session_state.selected_causes 
-    # when the user interacts with the widget on the page.
-    
-    # We just need to check if the user clicked the transition button.
-    # The button logic will be tied to st.form_submit_button, not this handler.
-    # We will remove this function and integrate the logic directly into the UI block for simplicity.
-    pass # No need for a separate handler function here since we use a form submit button.
-
-def run_with_progress(task_description, func, *args, **kwargs):
-    """Shows a spinner and processing message while running a function."""
-    with st.chat_message("assistant"):
-        with st.spinner(f"**Thinking...** {task_description}"):
-            # Add a message to the chat history to reflect the processing
-            st.session_state.chat_history.append({"role": "assistant", "content": f"*(Processing: {task_description})*"})
-            
-            # Run the actual function
-            result = func(*args, **kwargs)
-            
-            # Remove the processing message from the history before showing the final result
-            st.session_state.chat_history.pop() 
-            
-            return result
-
-# --- NEW LLM FUNCTION FOR FINAL SUMMARY ---
-
 def generate_human_summary(structured_statement: str) -> str:
     """Uses the LLM to convert the structured statement into a clean, human-readable summary."""
     if not client:
         # Fallback if LLM is disabled
-        return f"SUMMARY: {structured_statement.replace('Initial Problem:', '').replace('Additional Details:', ' - ')}"
+        return f"SUMMARY: {structured_statement.replace('Initial Problem:', 'Problem:').replace('Additional Details:', ' - Details: ')}"
 
     system_prompt = (
         "You are an expert technical writer. Your task is to take a structured problem description "
@@ -183,49 +156,79 @@ def generate_human_summary(structured_statement: str) -> str:
         st.error(f"Error generating final summary: {e}")
         return f"Could not generate summary. Raw data: {structured_statement}"
 
-# --- REVISED handle_confirmation FUNCTION ---
-def handle_confirmation(user_input):
-    """Handles Step 2.5: User confirms the problem statement summary."""
-    user_response = user_input.lower().strip()
-    update_chat("user", user_input)
+# app.py (New LLM Function: refine_problem_statement_with_causes)
+
+def refine_problem_statement_with_causes(original_statement: str, selected_causes: list) -> str:
+    """Uses the LLM to synthesize the problem statement and the user's selected causes."""
+    global client
+    if not client:
+        # Fallback if LLM is disabled
+        return f"FINAL CASE SUMMARY (LLM Disabled): {original_statement} - User confirmed the following likely causes: {', '.join(selected_causes)}"
+
+    # Construct the instruction for the LLM
+    input_text = f"""
+    Original Problem Statement: {original_statement}
+    User-Confirmed Root Causes: {', '.join(selected_causes)}
+    """
+
+    system_prompt = (
+        "You are an expert technical writer for a hardware support team. Your task is to review the "
+        "Original Problem Statement and the User-Confirmed Root Causes, and synthesize them into a "
+        "single, highly specific, and actionable **Case Summary** for a human agent. "
+        "The summary must be concise (2-3 sentences max) and clearly link the user's symptoms to the confirmed causes. "
+        "Start the output with 'Final Case Summary: ' and nothing else."
+    )
     
-    if user_response in ["yes", "yep", "correct", "yes it is", "yes, correct"]:
-        st.session_state.problem_statement_confirmed = True
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=input_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+            ),
+        )
+        return response.text.strip()
         
-        # 💡 NEW LOGIC: Automatically diagnose using the confirmed problem statement
-        action, cause = find_best_match_action_by_statement(st.session_state.problem_statement)
-        st.session_state.suggested_action = action
-        st.session_state.suggested_cause = cause
+    except Exception as e:
+        st.error(f"Error generating final case summary: {e}")
+        return f"Final Case Summary: {original_statement} - Confirmed Causes: {', '.join(selected_causes)}"
 
-        # 💡 NEW: Initialize selected_causes with the single suggested cause
-        st.session_state.selected_causes = [cause]
-        
-        update_chat("assistant", f"Great, confirmed! Based on your detailed statement, I have identified the most probable cause as **{cause}**. \n\nBefore escalating, please try this suggested action:\n\n**Action:** {action}\n\nIf the issue persists, we need to create a formal case. Please fill out the form below.")
-        
-        st.session_state.step = 4 # Skip old Step 3 and go directly to the Case Form (now Step 4)
-        
-    elif user_response in ["no", "nope", "incorrect", "no it's not", "no, incorrect"]:
-        st.session_state.problem_statement_confirmed = False
-        
-        # Clear refinement and go back to a manual input to fix the summary
-        st.session_state.refinement_history = []
-        st.session_state.pending_questions = []
-        
-        update_chat("assistant", "Apologies for the misunderstanding. Please provide a **new, complete and accurate summary** of your issue, incorporating any details I missed. This will restart the scoring process.")
-        st.session_state.step = 1.5
-    
-    else:
-        # Prompt for a clear Yes/No answer
-        update_chat("assistant", "Please confirm by simply typing 'Yes' or 'No'.")
-        # Step remains 2.5
-        
-    st.rerun()
+# --- UTILITY FUNCTIONS ---
 
+def run_with_progress(task_description, func, *args, **kwargs):
+    """Shows a spinner and processing message while running a function."""
+    with st.chat_message("assistant"):
+        # Add a message to the chat history to reflect the processing
+        st.session_state.chat_history.append({"role": "assistant", "content": f"*(Processing: {task_description})*"})
 
-# --- REVISED DIAGNOSIS FUNCTION BASED ON TEXT ---
+        with st.spinner(f"**Thinking...** {task_description}"):
+            # Run the actual function
+            result = func(*args, **kwargs)
+            
+            # Remove the processing message from the history before showing the final result
+            st.session_state.chat_history.pop() 
+            
+            return result
+
+def update_chat(role, content):
+    """Helper function to add messages to the chat history."""
+    st.session_state.chat_history.append({"role": role, "content": content})
+
+def reset_chat():
+    """Resets the entire chat state."""
+    st.session_state.chat_history = [{"role": "assistant", "content": "Hello! I'm your Technical Support Bot. Please describe the hardware issue you are facing to begin the triage process."}]
+    st.session_state.step = 1
+    st.session_state.problem_statement = ""
+    st.session_state.refinement_history = []
+    st.session_state.pending_questions = []
+    st.session_state.suggested_action = ""
+    st.session_state.suggested_cause = ""
+    st.session_state.selected_causes = []
+    st.session_state.problem_statement_confirmed = False
+    # st.rerun() <--- Rerun is not needed here because the button's callback handles it.
 
 def find_best_match_action_by_statement(problem_statement: str):
-    """Performs a simple keyword match against the mock database using the full problem statement."""
+    """Performs prioritized keyword matching against the mock database using the full problem statement."""
     
     statement_lower = problem_statement.lower()
     
@@ -240,7 +243,7 @@ def find_best_match_action_by_statement(problem_statement: str):
              if db_entry["cause"] == "Power Supply Unit (PSU) or Power Cable Issue":
                  return db_entry["action"], db_entry["cause"]
 
-    # Step 2: Fallback to the best score match for other issues (original logic)
+    # --- 2. FALLBACK SCORE CHECK (for all other issues) ---
     best_match = None
     best_score = 0
     
@@ -259,56 +262,16 @@ def find_best_match_action_by_statement(problem_statement: str):
     else:
         return "No specific match found in the database. Please fill out the form for human review.", "Uncategorized/Complex Issue"
 
-
-# --- 3. STREAMLIT APP LOGIC ---
-
-# Initialize Session State
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = [{"role": "assistant", "content": "Hello! I'm your Technical Support Bot. Please describe the hardware issue you are facing to begin the triage process."}]
-if "step" not in st.session_state:
-    st.session_state.step = 1 # 1: Initial Input, 2: Scoring, 3: Checklist, 4: Case Form
-if "problem_statement" not in st.session_state:
-    st.session_state.problem_statement = ""
-# 💡 REVISED: Use a list to hold all refinement attempts
-if "refinement_history" not in st.session_state:
-    st.session_state.refinement_history = [] 
-# 💡 NEW: List of pending questions (from LLM)
-if "pending_questions" not in st.session_state: 
-    st.session_state.pending_questions = []
-if "follow_up_questions" not in st.session_state:
-    st.session_state.follow_up_questions = []
-if "suggested_action" not in st.session_state:
-    st.session_state.suggested_action = ""
-if "suggested_cause" not in st.session_state:
-    st.session_state.suggested_cause = ""
-if "selected_causes" not in st.session_state:
-    st.session_state.selected_causes = []
-if "problem_statement_confirmed" not in st.session_state:
-    st.session_state.problem_statement_confirmed = False # NEW: Flag to track confirmation
-
-
-def update_chat(role, content):
-    """Helper function to add messages to the chat history."""
-    st.session_state.chat_history.append({"role": role, "content": content})
-
-def reset_chat():
-    """Resets the entire chat state."""
-    st.session_state.chat_history = [{"role": "assistant", "content": "Hello! I'm your Technical Support Bot. Please describe the hardware issue you are facing to begin the triage process."}]
-    st.session_state.step = 1
-    st.session_state.problem_statement = ""
-    st.session_state.refinement_history = []
-    st.session_state.pending_questions = []
-    st.session_state.suggested_action = ""
-    st.session_state.suggested_cause = ""
-    st.session_state.selected_causes = []
-    # st.rerun() <--- Rerun is not needed here because the button's callback handles it.
+# --- HANDLER FUNCTIONS ---
 
 def handle_initial_input(user_input):
-    """Handles Step 1: User provides initial statement and starts the refinement loop if score is LOW."""
-    update_chat("user", user_input)
-    st.session_state.problem_statement = user_input # Initial statement
+    """Handles Step 1/1.5: User provides initial statement and starts the refinement loop if score is LOW."""
+    update_chat("user", user_input) 
+
+    # 1. Store the initial problem statement
+    st.session_state.problem_statement = user_input
     
-    # 💡 REVISED: Use progress indicator for the LLM call
+    # Use progress indicator for the LLM call
     score, questions = run_with_progress("Analyzing your statement and generating follow-up questions...", get_scoring_and_suggestions, user_input)
     
     if score == "LOW":
@@ -320,8 +283,6 @@ def handle_initial_input(user_input):
         
         st.session_state.step = 2 # Move to refinement mode
     
-# --- REVISED handle_initial_input FUNCTION (Only the 'else' block) ---
-# ...
     else:
         # --- LOGIC FOR CLEAR STATEMENT (HIGH SCORE) ---
         
@@ -332,16 +293,16 @@ def handle_initial_input(user_input):
         st.session_state.suggested_action = action
         st.session_state.suggested_cause = cause
         
-        # 💡 NEW: Initialize selected_causes with the single suggested cause
+        # Initialize selected_causes with the single suggested cause
         st.session_state.selected_causes = [cause]
         
-        # 3. Inform the user
+        # 3. Inform the user and transition to Step 3 for confirmation
         update_chat("assistant", 
             f"Your initial problem statement is very clear! Based on this, I have identified the most probable cause as **{cause}**. Please review and confirm the diagnosis below before we proceed to the suggested action."
         )
         
         # 4. Skip Steps 2 and 2.5, and go directly to the Diagnosis Confirmation (Step 3)
-        st.session_state.step = 3 # <--- MOVED TO NEW STEP 3
+        st.session_state.step = 3
         
     st.rerun()
 
@@ -353,7 +314,6 @@ def handle_refinement(user_input):
     st.session_state.refinement_history.append(user_input)
     
     # 2. Build the FULL statement (initial + all refinements)
-    # 💡 REVISED: Create a human-readable summary string for the LLM input and final display
     full_statement_for_llm = (
         f"Initial Problem: {st.session_state.problem_statement}\n"
         f"Additional Details: {', '.join(st.session_state.refinement_history)}"
@@ -385,9 +345,8 @@ def handle_refinement(user_input):
             
         else:
             # Score is GOOD or LLM couldn't provide more questions
-            # 💡 REVISED: Generate a final, human-readable summary for display in the chat
             
-            # Use the LLM (or a template if LLM is down) to make the final statement clean and coherent
+            # Generate a final, human-readable summary for display in the chat
             final_summary = generate_human_summary(st.session_state.problem_statement)
             
             # Store this clean summary for the final case creation step
@@ -399,25 +358,77 @@ def handle_refinement(user_input):
             
         st.rerun()
 
-
-def handle_checklist_submission(selected_causes):
-    """Handles Step 3: User selects causes and gets the suggested action."""
-    st.session_state.selected_causes = selected_causes
+def handle_confirmation(user_input):
+    """Handles Step 2.5: User confirms the problem statement summary."""
+    user_response = user_input.lower().strip()
+    update_chat("user", user_input)
     
-    # Use the selected causes to find a match in the mock DB
-    action, cause = find_best_match_action(selected_causes)
-    st.session_state.suggested_action = action
-    st.session_state.suggested_cause = cause
+    if user_response in ["yes", "yep", "correct", "yes it is", "yes, correct"]:
+        st.session_state.problem_statement_confirmed = True
+        
+        # Automatically diagnose using the confirmed problem statement
+        action, cause = find_best_match_action_by_statement(st.session_state.problem_statement)
+        st.session_state.suggested_action = action
+        st.session_state.suggested_cause = cause
 
-    # Prepare final chat message and move to Step 4
-    update_chat("assistant", f"Based on your selections, the most probable cause is **{cause}**. \n\nBefore escalating, please try this suggested action:\n\n**Action:** {action}\n\nIf the issue persists, we need to create a formal case. Please fill out the form below.")
-    st.session_state.step = 4
+        # Initialize selected_causes with the single suggested cause
+        st.session_state.selected_causes = [cause]
+        
+        # Note: The suggested action/cause is now displayed in the Step 3 UI, not here.
+        update_chat("assistant", f"Great, confirmed! Based on your detailed statement, I have identified the most probable cause as **{cause}**. \n\nBefore escalating, please try this suggested action:\n\n**Action:** {action}\n\nIf the issue persists, we need to create a formal case. Please fill out the form below.")
+        
+        st.session_state.step = 4 # Skip old Step 3 and go directly to the Case Form (now Step 4)
+        
+    elif user_response in ["no", "nope", "incorrect", "no it's not", "no, incorrect"]:
+        st.session_state.problem_statement_confirmed = False
+        
+        # Clear refinement and go back to a manual input to fix the summary
+        st.session_state.refinement_history = []
+        st.session_state.pending_questions = []
+        
+        update_chat("assistant", "Apologies for the misunderstanding. Please provide a **new, complete and accurate summary** of your issue, incorporating any details I missed. This will restart the scoring process.")
+        st.session_state.step = 1.5
+    
+    else:
+        # Prompt for a clear Yes/No answer
+        update_chat("assistant", "Please confirm by simply typing 'Yes' or 'No'.")
+        # Step remains 2.5
+        
     st.rerun()
+
+def generate_comprehensive_action_summary(selected_causes: list) -> str:
+    """
+    Retrieves and combines suggested actions for all confirmed causes by 
+    searching the ISSUE_DATABASE list, ensuring clear separation for rendering.
+    """
+    # NOTE: Ensure ISSUE_DATABASE is accessible (e.g., globally defined or passed in)
+    
+    if not selected_causes:
+        return "No specific action suggested as no root cause was selected."
+    
+    action_parts = []
+    
+    # Iterate through the causes confirmed by the user
+    for confirmed_cause in selected_causes:
+        found_action = "No specific action found in database."
+        
+        # Search the ISSUE_DATABASE for the matching cause
+        for entry in ISSUE_DATABASE:
+            if entry.get("cause") == confirmed_cause:
+                # Found the entry, retrieve the action
+                found_action = entry.get("action", "Action not defined in entry.")
+                break 
+        
+        # Format the entry with a bullet point and bold text
+        # Using the exact formatting provided in your example output
+        action_parts.append(f"• **{confirmed_cause} Action:** {found_action}")
+        
+    # CRITICAL FIX: Join the parts with two newlines ('\n\n') 
+    # to force distinct paragraph breaks in the final rendered output.
+    return "\n\n".join(action_parts)
 
 def handle_case_submission(form_data):
     """Handles Step 4: Final case submission."""
-    import os # Ensure os is imported at the top of your script for this line
-    
     # In a real application, this data would be sent to a CRM/ticketing system via an API call.
     # For this demonstration, we are just generating a mock case ID.
     
@@ -440,6 +451,30 @@ def handle_case_submission(form_data):
     # Block further chat and offer reset
     st.session_state.step = 5
     st.rerun()
+
+# --- 3. STREAMLIT APP LOGIC (Session State Initialization) ---
+
+# Initialize Session State
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [{"role": "assistant", "content": "Hello! I'm your Technical Support Bot. Please describe the hardware issue you are facing to begin the triage process."}]
+if "step" not in st.session_state:
+    st.session_state.step = 1 # 1: Initial Input, 2: Scoring, 3: Checklist, 4: Case Form
+if "problem_statement" not in st.session_state:
+    st.session_state.problem_statement = ""
+if "refinement_history" not in st.session_state:
+    st.session_state.refinement_history = [] 
+if "pending_questions" not in st.session_state: 
+    st.session_state.pending_questions = []
+if "follow_up_questions" not in st.session_state:
+    st.session_state.follow_up_questions = []
+if "suggested_action" not in st.session_state:
+    st.session_state.suggested_action = ""
+if "suggested_cause" not in st.session_state:
+    st.session_state.suggested_cause = ""
+if "selected_causes" not in st.session_state:
+    st.session_state.selected_causes = []
+if "problem_statement_confirmed" not in st.session_state:
+    st.session_state.problem_statement_confirmed = False
 
 
 # --- 4. STREAMLIT UI ---
@@ -482,8 +517,9 @@ if st.session_state.step in [1, 1.5, 2]:
     
     elif st.session_state.step == 1.5:
         prompt_placeholder = "Enter your new, complete problem summary."
-        handler_func = handle_initial_input # Use initial handler to restart scoring
-        st.session_state.step = 1 # Revert to 1 after setting prompt (a quick hack)
+        handler_func = handle_initial_input
+        # Temporarily revert to 1 to match the prompt above, but logic uses 1.5
+        st.session_state.step = 1
 
     else: # st.session_state.step == 2
         prompt_placeholder = "Enter your answer to the question."
@@ -494,41 +530,23 @@ if st.session_state.step in [1, 1.5, 2]:
         handler_func(user_input)
 
 elif st.session_state.step == 2.5:
-    # --- NEW: Step 2.5: Confirmation ---
+    # --- Step 2.5: Confirmation ---
     prompt_placeholder = "Is the problem statement correct? Type 'Yes' or 'No'."
     user_input = st.chat_input(prompt_placeholder, key="confirm_input")
     if user_input:
         handle_confirmation(user_input)
-
-# --- Recommended simpler flow without st.form for step 3 ---
-# elif st.session_state.step == 3:
-#     st.subheader("Step 3: Diagnostic Checklist")
-#     st.markdown("Based on your problem, please select all the likely contributing factors from the list below.")
-    
-#     selected_causes = st.multiselect(
-#         "Select the possible causes for your issue:",
-#         options=COMMON_CAUSES,
-#         default=[]
-#     )
-    
-#     is_disabled = not bool(selected_causes) 
-    
-#     if st.button("Submit Checklist & Find Action", type="primary", disabled=is_disabled):
-#         handle_checklist_submission(selected_causes)
 
 elif st.session_state.step == 3:
     # --- Step 3: Diagnosis Confirmation (User interacts with form) ---
     st.subheader("Step 3: Confirm Diagnosis")
     st.markdown("Based on the chat, we have identified the most probable cause. Please **review and adjust** the selected causes below.")
 
-    # Get all possible options (COMMON_CAUSES was updated with the new database)
     options_list = sorted(list(COMMON_CAUSES)) 
 
     with st.form("diagnosis_confirmation_form"):
         
         # Multiselect allows user to change the causes, but defaults to the bot's suggestion
-        # The key ensures the selection is saved back to session_state.selected_causes
-        st.session_state.selected_causes = st.multiselect(
+        st.multiselect(
             "Select ALL potential Root Causes (Adjust the pre-selected option as needed):",
             options=options_list,
             default=st.session_state.selected_causes, 
@@ -538,35 +556,128 @@ elif st.session_state.step == 3:
         st.markdown(f"**Bot's Primary Suggestion:** {st.session_state.suggested_cause}")
         st.info("The primary cause is used to determine the first suggested action.")
 
-        # This button is essential to capture the user's action and move to Step 4
         proceed_button = st.form_submit_button(
             "Confirm Diagnosis and View Suggested Action", 
             type="primary",
-            # Requires at least one cause to be selected
             disabled=not st.session_state.selected_causes 
         )
 
     if proceed_button:
-        # User has reviewed and confirmed/adjusted the causes.
+        # 1. Retrieve and update the final selected causes
+        final_selection = st.session_state["final_cause_selection"]
         
-        # Update chat history with the final action before the form disappears
-        update_chat("assistant", 
-            f"Diagnosis Confirmed! Your primary issue is still focused on **{st.session_state.suggested_cause}**.\n\n"
-            f"**Suggested Action:** {st.session_state.suggested_action}\n\n"
-            f"If the issue persists after performing the action, please use the form below to submit a case with the confirmed diagnosis."
+        if not final_selection:
+            st.warning("Please select at least one cause to proceed.")
+            st.rerun() 
+
+        st.session_state.selected_causes = final_selection
+
+        # -----------------------------------------------------------
+        # NEW: Add the user's explicit selection to the chat history
+        # -----------------------------------------------------------
+        selected_causes_text = ", ".join(st.session_state.selected_causes)
+        
+        # Log the user's action *before* the bot responds
+        update_chat("user", f"I have confirmed the diagnosis. The likely root causes are: **{selected_causes_text}**")
+
+        # 2. Refine the Problem Statement (Logic remains the same)
+        final_case_summary = run_with_progress(
+            "Generating final case summary using user-confirmed causes...",
+            refine_problem_statement_with_causes,
+            st.session_state.problem_statement,
+            st.session_state.selected_causes
         )
-        st.session_state.step = 4 # Move to the Case Creation Form
+        st.session_state.problem_statement = final_case_summary
+        
+        # 3. **NEW:** Generate Comprehensive Suggested Actions
+        comprehensive_action = generate_comprehensive_action_summary(st.session_state.selected_causes)
+        st.session_state.suggested_action = comprehensive_action
+        
+        # 4. Update chat history with the FINAL summary and action
+        update_chat("assistant", 
+            f"**✅ Diagnosis Complete!** Here is the final information before you try the fix:\n\n"
+            f"**Final Case Summary:** \n> {st.session_state.problem_statement}\n\n"
+            f"**Confirmed Causes:** {', '.join(st.session_state.selected_causes)}\n\n"
+            f"**Suggested Actions (Covering ALL Confirmed Causes):**\n\n{st.session_state.suggested_action}\n\n" # st.session_state.suggested_action now contains '\n\n' separators
+            f"**Please try the suggested action(s) now and let me know the result.**"
+        )
+        st.session_state.step = 3.5 # Move to the resolution check
         st.rerun()
+
+elif st.session_state.step == 3.5:
+    # --- Step 3.5: Resolution Check ---
+    st.subheader("Step 3.5: Did the Suggested Action Work? 🤔")
+    st.markdown("We have provided a detailed summary and the suggested action above. **Please attempt that action now.**")
+    
+    # Show key details for quick reference
+    st.info(f"**Action to Try:** \n\n{st.session_state.suggested_action}")
+    
+    st.markdown("Once you've tried the action, please let us know the outcome:")
+    
+    col_yes, col_no = st.columns(2)
+    
+    # RESOLVED (Moves to Step 5: Finished) - Set type="primary" (Green/Success)
+    # ----------------------------------------------------
+    # YES Button (Green - SUCCESS)
+    # ----------------------------------------------------
+    with col_yes:
+        with stylable_container(
+            key="green_button",
+            css_styles="""
+                button {
+                    background-color: #28a745; /* Bootstrap Green */
+                    color: white;
+                    border-color: #28a745;
+                }
+                button:hover {
+                    background-color: #218838; /* Slightly darker on hover */
+                    border-color: #218838;
+                }
+            """
+        ):
+            if st.button("✅ Yes, the issue is resolved!", use_container_width=True):
+                # Log User's Action
+                update_chat("user", "The suggested action worked! My issue is now resolved.")
+                # Bot's Success Message
+                update_chat("assistant", "Fantastic news! We're glad the issue was resolved without needing a human agent. Happy printing/computing! This chat is now closed.")
+                st.session_state.step = 5
+                st.rerun()
+        
+    # NOT RESOLVED (Moves to Step 4: Case Creation)
+    # ----------------------------------------------------
+    # NO Button (Red - ESCALATE)
+    # ----------------------------------------------------
+    with col_no:
+        with stylable_container(
+            key="red_button",
+            css_styles="""
+                button {
+                    background-color: #dc3545; /* Bootstrap Red */
+                    color: white;
+                    border-color: #dc3545;
+                }
+                button:hover {
+                    background-color: #c82333; /* Slightly darker on hover */
+                    border-color: #c82333;
+                }
+            """
+        ):
+            if st.button("❌ No, the issue persists. Create a case.", use_container_width=True):
+                # Log User's Action
+                update_chat("user", "The suggested action did not fix the problem. The issue still persists.")
+                # Bot's Escalation Message
+                update_chat("assistant", "I'm sorry the issue persists. Since the initial fix didn't work, we'll proceed immediately to creating a formal support case. Please fill out the form below.")
+                st.session_state.step = 4
+                st.rerun()
 
 elif st.session_state.step == 4:
     # --- Step 4: Case Creation Form ---
     st.subheader("Step 4: Create a Support Case")
     st.markdown("The suggested action has been provided. If the issue persists, please submit the following form to create a formal case with our support team.")
 
-    # 💡 NEW: Placeholder for validation message
     validation_placeholder = st.empty()
 
-    # 💡 NEW: Define the list of causes to display as 'selected'
+    # Define the list of causes to display as 'selected'
     # The list contains only the cause identified by the bot.
     # We use a set for the options to ensure the bot's suggested cause is definitely included.
     
@@ -587,7 +698,6 @@ elif st.session_state.step == 4:
         col1, col2 = st.columns(2)
         
         # Contact Information - HIGHLIGHTED REQUIRED FIELDS
-        # Note: Added 'key' and Markdown for visual emphasis
         name = col1.text_input("**Full Name** (Required)", key="case_name")
         email = col2.text_input("**Email Address** (Required)", key="case_email")
         phone = col1.text_input("Phone Number (Optional)")
@@ -598,13 +708,13 @@ elif st.session_state.step == 4:
         # Issue Summary (Pre-filled)
         st.caption("Final Problem Statement (Refined by the chat):")
         final_statement = st.text_area(
-            "Final Problem Statement",
+            "**Final Refined Case Summary** (Generated based on your confirmed causes):",
             value=st.session_state.problem_statement,
             height=150,
             disabled=True
         )
 
-        st.caption("Selected Causes:")
+        st.caption("Confirmed Root Causes:")
         st.multiselect(
             "Selected Causes",
             options=COMMON_CAUSES,
@@ -614,14 +724,14 @@ elif st.session_state.step == 4:
         
         st.info(f"**Bot Identified Cause:** {st.session_state.suggested_cause}")
 
-        # Submission Button - ALWAYS ENABLED (disabled=False or omitted)
+        # Submission Button
         submit_case = st.form_submit_button(
             "Submit Case to Human Agent", 
             type="primary", 
             disabled=False # Button is always enabled now
         )
 
-    # 💡 REVISED: Validation logic runs ONLY after the button is clicked
+    # Validation logic runs ONLY after the button is clicked
     if submit_case:
         
         required_inputs = {
@@ -640,7 +750,6 @@ elif st.session_state.step == 4:
             # If fields are missing, display the error message in the placeholder
             error_message = f"**⚠️ Please fill in all required fields to submit the case.** Missing: {', '.join(missing_fields)}"
             validation_placeholder.error(error_message)
-            # The form submission itself stops here because we don't call handle_case_submission
         else:
             # If the form is valid, clear any previous error and submit the case
             validation_placeholder.empty()
@@ -658,5 +767,10 @@ elif st.session_state.step == 4:
 
 elif st.session_state.step == 5:
     # --- Step 5: Finished/Reset ---
-    st.info("The case has been finalized. Please start a new chat if you have another issue.")
+    
+    if "resolved" in st.session_state.chat_history[-1]["content"].lower():
+        st.success("🎉 Issue Resolved! The chat is closed. Click 'Start New Chat' in the sidebar for a new issue.")
+    else:
+        st.info("The case has been finalized. Please start a new chat if you have another issue.")
+        
     st.chat_input("Chat is finished. Click 'Start New Chat' in the sidebar.", disabled=True)
