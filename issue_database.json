@@ -1,0 +1,47 @@
+[
+    {
+        "cause": "Power Supply Unit (PSU) or Power Cable Issue",
+        "keywords": ["no power", "won't turn on", "dead", "power issue", "no light", "off"],
+        "action": "Check the power cable connection to the wall and the device. Try a different power outlet or a different cable (if available). If the issue persists, the internal power supply unit (PSU) or power board has failed and requires professional service."
+    },
+    {
+        "cause": "Driver/Software Communication or Paper Jam",
+        "keywords": ["print error", "jam", "offline", "communication", "not printing", "scans blank"],
+        "action": "Clear any visible or internal paper jams. Reinstall the printer drivers. If connected via Wi-Fi, run the manufacturer's network setup utility to confirm the connection status."
+    },
+    {
+        "cause": "Empty Ink/Toner Cartridge or Low Tank Levels",
+        "keywords": ["faded", "blank pages", "no color", "empty ink", "low ink", "toner low"],
+        "action": "Replace the indicated ink or toner cartridge, or refill the specific ink tank to the required level. Run a print head cleaning cycle if colors are still inconsistent after replacement/refill."
+    },
+    {
+        "cause": "Clogged Print Head (Inkjet)",
+        "keywords": ["streaks", "missing lines", "banding", "poor quality", "clogged"],
+        "action": "Run two cycles of 'Print Head Cleaning' from the printer utility software or the printer's maintenance menu. If the problem persists, try a 'Deep Cleaning' cycle."
+    },
+    {
+        "cause": "Fuser Unit Failure (Laser)",
+        "keywords": ["smudging", "smears", "wipes off", "not fixing", "powder"],
+        "action": "The toner is not being properly fused to the paper. This usually indicates a failure in the fuser unit, which is a key component in laser printers and often requires replacement."
+    },
+    {
+        "cause": "Wi-Fi Connection Loss or Incorrect Password",
+        "keywords": ["wifi error", "disconnected", "no internet", "network", "can't see"],
+        "action": "Restart the router and the printer. Re-enter the Wi-Fi password on the printer's control panel. Ensure the printer is on the same 2.4GHz network as the computer/phone."
+    },
+    {
+        "cause": "USB Port/Cable Malfunction",
+        "keywords": ["usb disconnect", "not recognized", "cable fault"],
+        "action": "Try connecting the printer to a different USB port on your computer. If the issue continues, replace the USB cable (ensure it is rated USB 2.0 or higher)."
+    },
+    {
+        "cause": "Operating System Update Incompatibility",
+        "keywords": ["after update", "os update", "windows 11", "macos Sonoma"],
+        "action": "Check the manufacturer's website for the latest drivers compatible with your recent OS update. Completely remove old drivers before installing the new ones."
+    },
+    {
+        "cause": "Uncategorized/Complex Issue",
+        "keywords": [],
+        "action": "No specific automated action could be determined. Your case requires human review. Please fill out the form to create a support ticket."
+    }
+]

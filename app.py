@@ -20,67 +20,33 @@ except Exception as e:
     st.error(f"Error initializing Gemini client: {e}")
     client = None
 
-# Mock Database for Issue Matching (Step 3)
-ISSUE_DATABASE = [
-    # ------------------------------------------------------------------
-    # 1. CRITICAL: NO POWER / HARDWARE FAILURE (High Priority Match)
-    # ------------------------------------------------------------------
-    {
-        "cause": "Power Supply Unit (PSU) or Power Cable Issue",
-        "keywords": ["no power", "won't turn on", "dead", "power issue", "no light", "off"],
-        "action": "Check the power cable connection to the wall and the device. Try a different power outlet or a different cable (if available). If the issue persists, the internal power supply unit (PSU) or power board has failed and requires professional service."
-    },
-    
-    # ------------------------------------------------------------------
-    # 2. PRINTING/SCANNING ERRORS (Generic MFP Issues)
-    # ------------------------------------------------------------------
-    {
-        "cause": "Driver/Software Communication or Paper Jam",
-        "keywords": ["print error", "jam", "offline", "communication", "not printing", "scans blank"],
-        "action": "Clear any visible or internal paper jams. Reinstall the printer drivers. If connected via Wi-Fi, run the manufacturer's network setup utility to confirm the connection status."
-    },
-    {
-        "cause": "Empty Ink/Toner Cartridge or Low Tank Levels",
-        "keywords": ["faded", "blank pages", "no color", "empty ink", "low ink", "toner low"],
-        "action": "Replace the indicated ink or toner cartridge, or refill the specific ink tank to the required level. Run a print head cleaning cycle if colors are still inconsistent after replacement/refill."
-    },
-    {
-        "cause": "Clogged Print Head (Inkjet)",
-        "keywords": ["streaks", "missing lines", "banding", "poor quality", "clogged"],
-        "action": "Run two cycles of 'Print Head Cleaning' from the printer utility software or the printer's maintenance menu. If the problem persists, try a 'Deep Cleaning' cycle."
-    },
-    {
-        "cause": "Fuser Unit Failure (Laser)",
-        "keywords": ["smudging", "smears", "wipes off", "not fixing", "powder"],
-        "action": "The toner is not being properly fused to the paper. This usually indicates a failure in the fuser unit, which is a key component in laser printers and often requires replacement."
-    },
+DATABASE_FILE = "issue_database.json"
 
-    # ------------------------------------------------------------------
-    # 3. CONNECTIVITY ISSUES
-    # ------------------------------------------------------------------
-    {
-        "cause": "Wi-Fi Connection Loss or Incorrect Password",
-        "keywords": ["wifi error", "disconnected", "no internet", "network", "can't see"],
-        "action": "Restart the router and the printer. Re-enter the Wi-Fi password on the printer's control panel. Ensure the printer is on the same 2.4GHz network as the computer/phone."
-    },
-    {
-        "cause": "USB Port/Cable Malfunction",
-        "keywords": ["usb disconnect", "not recognized", "cable fault"],
-        "action": "Try connecting the printer to a different USB port on your computer. If the issue continues, replace the USB cable (ensure it is rated USB 2.0 or higher)."
-    },
+@st.cache_data
+def load_issue_database(file_path: str) -> list[dict]:
+    """
+    Loads the issue database from a JSON file into a list of dictionaries.
+    Caches the result to avoid re-reading the file on every script rerun.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        st.error(f"Error: The database file '{file_path}' was not found. Please ensure it exists in the root directory.")
+        return []
+    except Exception as e:
+        st.error(f"An error occurred while loading the database: {e}")
+        return []
 
-    # ------------------------------------------------------------------
-    # 4. OPERATING SYSTEM / SOFTWARE
-    # ------------------------------------------------------------------
-    {
-        "cause": "Operating System Update Incompatibility",
-        "keywords": ["after update", "os update", "windows 11", "macos Sonoma"],
-        "action": "Check the manufacturer's website for the latest drivers compatible with your recent OS update. Completely remove old drivers before installing the new ones."
-    },
-]
+# Load the database from the CSV file
+ISSUE_DATABASE = load_issue_database(DATABASE_FILE)
 
 # Create a master list of all possible causes for the multiselect options list
-COMMON_CAUSES = [entry["cause"] for entry in ISSUE_DATABASE]
+if ISSUE_DATABASE:
+    COMMON_CAUSES = [entry["cause"] for entry in ISSUE_DATABASE]
+else:
+    COMMON_CAUSES = []
+
 
 # Pydantic Schema for LLM Response (Scoring)
 class ScoringResponse(BaseModel):
@@ -227,6 +193,21 @@ def reset_chat():
     st.session_state.problem_statement_confirmed = False
     # st.rerun() <--- Rerun is not needed here because the button's callback handles it.
 
+def log_new_issue_for_review(form_data: dict):
+    """Appends an uncategorized issue to a JSONL file for human review."""
+    log_file = "new_issues_log.jsonl"
+    try:
+        with open(log_file, 'a', newline='', encoding='utf-8') as f:
+            # Create a log entry dictionary
+            log_entry = {
+                "problem_statement": form_data['problem_statement'],
+                "final_selected_causes": form_data['selected_causes']
+            }
+            # Write the JSON object as a single line
+            f.write(json.dumps(log_entry) + '\n')
+    except Exception as e:
+        st.warning(f"Could not write to the new issue log file '{log_file}': {e}")
+
 def find_best_match_action_by_statement(problem_statement: str):
     """Performs prioritized keyword matching against the mock database using the full problem statement."""
     
@@ -260,7 +241,11 @@ def find_best_match_action_by_statement(problem_statement: str):
     if best_match:
         return best_match["action"], best_match["cause"]
     else:
-        return "No specific match found in the database. Please fill out the form for human review.", "Uncategorized/Complex Issue"
+        # If no keyword match is found, explicitly find and return the fallback "Uncategorized" entry.
+        # This is more robust than assuming it's the last item in the list.
+        for entry in ISSUE_DATABASE:
+            if entry["cause"] == "Uncategorized/Complex Issue":
+                return entry["action"], entry["cause"]
 
 # --- HANDLER FUNCTIONS ---
 
@@ -289,20 +274,27 @@ def handle_initial_input(user_input):
         # 1. Run Automatic Diagnosis
         action, cause = find_best_match_action_by_statement(user_input)
         
-        # 2. Save the results
-        st.session_state.suggested_action = action
-        st.session_state.suggested_cause = cause
-        
-        # Initialize selected_causes with the single suggested cause
-        st.session_state.selected_causes = [cause]
-        
-        # 3. Inform the user and transition to Step 3 for confirmation
-        update_chat("assistant", 
-            f"Your initial problem statement is very clear! Based on this, I have identified the most probable cause as **{cause}**. Please review and confirm the diagnosis below before we proceed to the suggested action."
-        )
-        
-        # 4. Skip Steps 2 and 2.5, and go directly to the Diagnosis Confirmation (Step 3)
-        st.session_state.step = 3
+        if cause == "Uncategorized/Complex Issue":
+            # If the issue is complex, skip diagnosis confirmation and go directly to case creation.
+            st.session_state.suggested_cause = cause
+            st.session_state.selected_causes = [cause]
+            update_chat("assistant", 
+                "Thank you for the clear statement. This seems to be a complex issue that I can't categorize automatically. "
+                "Let's create a support case directly for a human agent to review. Please fill out the form below."
+            )
+            st.session_state.step = 4 # Go directly to Case Creation
+        else:
+            # For standard issues, proceed to the normal diagnosis confirmation step.
+            st.session_state.suggested_action = action
+            st.session_state.suggested_cause = cause
+            st.session_state.selected_causes = [cause]
+            
+            update_chat("assistant", 
+                f"Your initial problem statement is very clear! Based on this, I have identified the most probable cause as **{cause}**. "
+                "Please review and confirm the diagnosis below before we proceed to the suggested action."
+            )
+            # Go to the Diagnosis Confirmation (Step 3)
+            st.session_state.step = 3
         
     st.rerun()
 
@@ -368,16 +360,23 @@ def handle_confirmation(user_input):
         
         # Automatically diagnose using the confirmed problem statement
         action, cause = find_best_match_action_by_statement(st.session_state.problem_statement)
-        st.session_state.suggested_action = action
-        st.session_state.suggested_cause = cause
-
-        # Initialize selected_causes with the single suggested cause
-        st.session_state.selected_causes = [cause]
         
-        # Note: The suggested action/cause is now displayed in the Step 3 UI, not here.
-        update_chat("assistant", f"Great, confirmed! Based on your detailed statement, I have identified the most probable cause as **{cause}**. \n\nBefore escalating, please try this suggested action:\n\n**Action:** {action}\n\nIf the issue persists, we need to create a formal case. Please fill out the form below.")
-        
-        st.session_state.step = 4 # Skip old Step 3 and go directly to the Case Form (now Step 4)
+        if cause == "Uncategorized/Complex Issue":
+            # If the issue is complex, skip diagnosis confirmation and go directly to case creation.
+            st.session_state.suggested_cause = cause
+            st.session_state.selected_causes = [cause]
+            update_chat("assistant", 
+                "Thank you for confirming the summary. This seems to be a complex issue that I can't categorize automatically. "
+                "Let's create a support case directly for a human agent to review. Please fill out the form below."
+            )
+            st.session_state.step = 4 # Go directly to Case Creation
+        else:
+            # For standard issues, proceed to the normal diagnosis confirmation step.
+            st.session_state.suggested_action = action
+            st.session_state.suggested_cause = cause
+            st.session_state.selected_causes = [cause]
+            update_chat("assistant", f"Great, confirmed! Based on your detailed statement, I have identified the most probable cause as **{cause}**. Please review and confirm the diagnosis below before we proceed.")
+            st.session_state.step = 3 # Go to Diagnosis Confirmation
         
     elif user_response in ["no", "nope", "incorrect", "no it's not", "no, incorrect"]:
         st.session_state.problem_statement_confirmed = False
@@ -432,6 +431,11 @@ def handle_case_submission(form_data):
     # In a real application, this data would be sent to a CRM/ticketing system via an API call.
     # For this demonstration, we are just generating a mock case ID.
     
+    # If the issue was uncategorized, log it for future database improvement
+    if "Uncategorized/Complex Issue" in form_data['selected_causes']:
+        log_new_issue_for_review(form_data)
+        st.toast("This uncategorized issue has been logged for future improvement. Thank you!")
+
     # Generate a mock Case ID
     case_id = f"TKT-{os.urandom(4).hex().upper()}"
 
@@ -677,22 +681,9 @@ elif st.session_state.step == 4:
 
     validation_placeholder = st.empty()
 
-    # Define the list of causes to display as 'selected'
-    # The list contains only the cause identified by the bot.
-    # We use a set for the options to ensure the bot's suggested cause is definitely included.
-    
-    bot_suggested_cause = st.session_state.suggested_cause
-    
-    # Ensure the full list of options includes the bot's suggestion
-    # (Assuming COMMON_CAUSES is a list/set of all possible causes)
-    all_available_causes = set(COMMON_CAUSES) 
-    all_available_causes.add(bot_suggested_cause)
-    
-    # Convert the set back to a list for the multiselect options
-    options_list = sorted(list(all_available_causes)) 
-    
-    # The default value is a list containing only the suggested cause
-    default_selection = [bot_suggested_cause]
+    # The options list is simply all known causes.
+    # We sort the list for consistent display. The "Uncategorized" cause will now be included.
+    options_list = sorted(list(COMMON_CAUSES))
 
     with st.form("case_creation_form"):
         col1, col2 = st.columns(2)

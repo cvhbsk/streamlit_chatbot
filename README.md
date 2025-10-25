@@ -2,7 +2,7 @@
 
 ## 📝 Project Summary
 
-This project implements a multi-step, **stateful technical support chatbot** using Streamlit. It is designed to efficiently triage hardware issues by guiding the user through a refinement process, automatically diagnosing the root cause using a keyword-based database, suggesting an immediate action, and providing a final form for case escalation to a human agent.
+This project implements a multi-step, **stateful technical support chatbot** using Streamlit and the Gemini API. It is designed to efficiently triage hardware issues by guiding the user through a problem refinement process, automatically diagnosing the root cause, suggesting immediate actions, and providing a final form for case escalation to a human agent only if the suggested actions fail.
 
 The core goal is to minimize human agent workload by resolving clear issues or collecting complete diagnostic information for complex cases.
 
@@ -10,11 +10,14 @@ The core goal is to minimize human agent workload by resolving clear issues or c
 
 ## ✨ Key Features
 
-* **Stateful Conversation:** Uses Streamlit's `st.session_state` to maintain context across the entire multi-step process.
-* **Intelligent Triage Flow:** Adapts the conversation based on the user's initial problem statement.
-* **Automatic Diagnosis (Step 3):** Uses a prioritized, keyword-based lookup against a mock `ISSUE_DATABASE` to suggest the most probable cause and action.
-* **User Diagnosis Confirmation:** Allows the user to review and adjust the automatically selected root causes via an interactive `st.multiselect`.
-* **Case Escalation (Step 4):** A robust form with on-click validation to gather mandatory contact and product details before "submitting" the case.
+*   **Stateful Conversation:** Uses Streamlit's `st.session_state` to maintain context across the entire multi-step process.
+*   **LLM-Powered Refinement:** Employs the Gemini API to evaluate the clarity of a user's problem statement and generate targeted follow-up questions if it's too vague.
+*   **Automatic Diagnosis:** Uses a prioritized, keyword-based lookup against a mock `ISSUE_DATABASE` to suggest the most probable cause.
+*   **Interactive Diagnosis Confirmation:** Allows the user to review and adjust the automatically selected root causes via an interactive `st.multiselect` form.
+*   **Comprehensive Action Generation:** Dynamically generates a list of suggested actions based on *all* root causes confirmed by the user.
+*   **Resolution Checkpoint:** Explicitly asks the user if the suggested actions resolved the issue before proceeding to case creation, preventing unnecessary escalations.
+*   **LLM-Powered Case Summary:** Synthesizes the original problem, user refinements, and confirmed causes into a final, concise case summary for human agents.
+*   **Validated Escalation Form:** A robust form with on-click validation to gather mandatory contact and product details before "submitting" the case.
 
 ---
 
@@ -79,14 +82,20 @@ The application will open automatically in your web browser (usually at `http://
 
 -----
 
-## 🚀 Usage Flow
+## 🚀 Application Flow
 
-The application follows a linear, four-step process for problem resolution:
+The application follows a conditional, multi-step process for problem resolution:
 
 1.  **Initial Input (Step 1):** User describes the hardware issue.
-2.  **Refinement/Confirmation (Step 2/2.5):** If the statement is complex, the bot asks follow-up questions. The user confirms the final problem summary.
-3.  **Diagnosis Confirmation (Step 3):** The bot displays the most probable **Cause** and pre-selects it in a multiselect. The user can adjust this list of causes before proceeding.
-4.  **Case Creation Form (Step 4):** Displays the final suggested action and collects mandatory contact information for case escalation to a human agent.
+    *   **If the statement is clear:** The bot skips to Step 3.
+    *   **If the statement is vague:** The bot proceeds to Step 2.
+2.  **Refinement & Confirmation (Steps 2 & 2.5):** The bot asks a series of LLM-generated follow-up questions. After gathering details, it presents a synthesized summary for user confirmation ('Yes'/'No').
+3.  **Diagnosis Confirmation (Step 3):** The bot displays the most probable **Cause** and pre-selects it in a multiselect form. The user can add or remove causes from this list and confirm their selection.
+4.  **Resolution Check (Step 3.5):** The bot presents a final case summary and a comprehensive list of suggested actions based on all confirmed causes. The user is prompted to try these actions and report the outcome.
+    *   **If the issue is resolved:** The chat ends successfully (Step 5).
+    *   **If the issue persists:** The user is directed to the final escalation step.
+5.  **Case Creation Form (Step 4):** A form appears, pre-filled with the final case summary. The user must provide contact and product details to submit the case to a human agent.
+6.  **Submission Complete (Step 5):** The bot confirms case creation and the chat is closed.
 
 -----
 
@@ -94,13 +103,15 @@ The application follows a linear, four-step process for problem resolution:
 
 ### State Management
 
-All variables controlling the application flow are stored in `st.session_state`:
+All variables controlling the application flow and conversation history are stored in `st.session_state`:
 
 | Variable | Purpose |
 | :--- | :--- |
-| `st.session_state.step` | Controls the current UI state (1, 2, 2.5, 3, 4, 5). |
+| `st.session_state.step` | Controls the current UI state (1, 1.5, 2, 2.5, 3, 3.5, 4, 5). |
 | `st.session_state.problem_statement`| The continuously refined description of the user's issue. |
-| `st.session_state.suggested_cause` | The single primary cause identified by the bot. |
+| `st.session_state.suggested_cause` | The single primary cause identified by the keyword-based diagnosis. |
+| `st.session_state.selected_causes` | A list of all causes confirmed by the user in the Step 3 multiselect form. |
+| `st.session_state.suggested_action` | A comprehensive string of all actions corresponding to the `selected_causes`. |
 
 ### Diagnosis Logic (`find_best_match_action_by_statement`)
 
